@@ -6,6 +6,7 @@ motion_features: ${hydra:runtime.choices.motion_loader}
 text_features: ${hydra:runtime.choices.text_encoder}
 
 run_dir: outputs/mdm-smpl-keyframe_${text_features}_${motion_features}_${dataset}
+exp_name: mdm-smpl-keyframe_${text_features}_${motion_features}_${dataset}
 
 dataloader:
   _target_: torch.utils.data.DataLoader
@@ -18,7 +19,7 @@ defaults:
   - text_encoder: clip
   - motion_loader: smplrifke
   - mdm_smpl_keyframe  # Use keyframe-enabled configuration
-  - trainer
+  - trainer: trainer_wandb  # Use wandb-enabled trainer for experiment tracking
   - defaults
   - _self_
 
