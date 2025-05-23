@@ -19,6 +19,7 @@ class TransformerDenoiser(nn.Module):
         dropout: float = 0.1,
         nb_registers: int = 2,
         activation: str = "gelu",
+        keyframe_conditioned: bool = False,
     ):
         super().__init__()
 
@@ -27,6 +28,7 @@ class TransformerDenoiser(nn.Module):
         self.num_heads = num_heads
         self.nb_registers = nb_registers
         self.tx_dim = tx_dim
+        self.keyframe_conditioned = keyframe_conditioned
 
         # Linear layer for the condition
         self.tx_embedding = nn.Sequential(
@@ -38,6 +40,14 @@ class TransformerDenoiser(nn.Module):
 
         # Linear layer for the skeletons
         self.skel_embedding = nn.Linear(nfeats, latent_dim)
+        
+        # Keyframe conditioning components
+        if self.keyframe_conditioned:
+            # Learnable embeddings for keyframe status
+            self.keyframe_token_embedding = nn.Embedding(2, latent_dim)  # 0: non-keyframe, 1: keyframe
+            
+            # Optional: separate embedding for observed keyframe data
+            self.keyframe_data_embedding = nn.Linear(nfeats, latent_dim)
 
         # register for aggregating info
         if nb_registers > 0:
@@ -101,11 +111,33 @@ class TransformerDenoiser(nn.Module):
             info_emb = torch.cat((info_emb, registers), 1)
             info_mask = torch.cat((info_mask, registers_mask), 1)
 
-        x = self.skel_embedding(x)
+        # Process motion embeddings
+        x_emb = self.skel_embedding(x)
+        
+        # Add keyframe conditioning if enabled
+        if self.keyframe_conditioned and "keyframe_mask" in y:
+            keyframe_mask = y["keyframe_mask"]  # [bs, nframes] - True for keyframes
+            
+            # Create keyframe token embeddings
+            keyframe_tokens = keyframe_mask.long()  # Convert to long for embedding lookup
+            keyframe_emb = self.keyframe_token_embedding(keyframe_tokens)  # [bs, nframes, latent_dim]
+            
+            # Add keyframe information to motion embeddings
+            x_emb = x_emb + keyframe_emb
+            
+            # Optional: For keyframe regions, also incorporate the clean data
+            if "keyframe_x0" in y:
+                keyframe_x0 = y["keyframe_x0"]  # Clean motion data
+                keyframe_data_emb = self.keyframe_data_embedding(keyframe_x0)
+                
+                # Only add keyframe data embedding where we have keyframes
+                keyframe_mask_expanded = keyframe_mask.unsqueeze(-1)  # [bs, nframes, 1]
+                x_emb = x_emb + keyframe_data_emb * keyframe_mask_expanded.float()
+
         number_of_info = info_emb.shape[1]
 
         # adding the embedding token for all sequences
-        xseq = torch.cat((info_emb, x), 1)
+        xseq = torch.cat((info_emb, x_emb), 1)
 
         # add positional encoding to all the tokens
         xseq = self.sequence_pos_encoding(xseq)

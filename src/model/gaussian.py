@@ -7,6 +7,12 @@ import torch
 from .diffusion_base import DiffuserBase
 from ..data.collate import length_to_mask, collate_tensor_with_padding
 from src.stmc import combine_features_intervals, interpolate_intervals
+from src.utils.keyframe_masking import (
+    get_keyframes_mask, 
+    apply_keyframe_conditioning,
+    create_keyframe_loss_mask,
+    get_random_keyframe_dropout_mask
+)
 
 
 # Inplace operator: return the original tensor
@@ -38,6 +44,12 @@ class GaussianDiffusion(DiffuserBase):
         text_normalizer,
         prediction: str = "x",
         lr: float = 2e-4,
+        # Keyframe conditioning parameters
+        keyframe_conditioned: bool = False,
+        keyframe_selection_scheme: str = "random_frames",
+        keyframe_mask_prob: float = 0.1,
+        zero_keyframe_loss: bool = False,
+        n_keyframes: int = 10,
     ):
         super().__init__(schedule, timesteps)
 
@@ -46,11 +58,18 @@ class GaussianDiffusion(DiffuserBase):
         self.lr = lr
         self.prediction = prediction
 
-        self.reconstruction_loss = torch.nn.MSELoss(reduction="mean")
+        self.reconstruction_loss = torch.nn.MSELoss(reduction="none")  # Changed to 'none' for masking
 
         # normalization
         self.motion_normalizer = motion_normalizer
         self.text_normalizer = text_normalizer
+        
+        # Keyframe conditioning parameters
+        self.keyframe_conditioned = keyframe_conditioned
+        self.keyframe_selection_scheme = keyframe_selection_scheme
+        self.keyframe_mask_prob = keyframe_mask_prob
+        self.zero_keyframe_loss = zero_keyframe_loss
+        self.n_keyframes = n_keyframes
 
     def configure_optimizers(self) -> None:
         return {"optimizer": torch.optim.AdamW(lr=self.lr, params=self.parameters())}
@@ -67,16 +86,44 @@ class GaussianDiffusion(DiffuserBase):
         return tx
 
     def diffusion_step(self, batch, batch_idx, training=False):
-        mask = batch["mask"]
+        mask = batch["mask"]  # Valid motion mask [batch_size, max_frames]
 
         # normalization
         x = masked(self.motion_normalizer(batch["x"]), mask)
+        
+        # Prepare base conditioning
         y = {
             "length": batch["length"],
             "mask": mask,
             "tx": self.prepare_tx_emb(batch["tx"]),
             # the condition is already dropped sometimes in the dataloader
         }
+
+        # Add keyframe conditioning if enabled
+        keyframe_mask = None
+        if self.keyframe_conditioned and training:
+            # Generate keyframe mask during training
+            keyframe_mask = get_keyframes_mask(
+                data=batch["x"],  # Use original (non-normalized) data for masking
+                lengths=batch["length"],
+                edit_mode=self.keyframe_selection_scheme,
+                n_keyframes=self.n_keyframes,
+                device=x.device
+            )
+            
+            # Apply keyframe dropout for robustness
+            if self.keyframe_mask_prob > 0.0:
+                keyframe_mask = get_random_keyframe_dropout_mask(
+                    keyframe_mask, 
+                    dropout_prob=self.keyframe_mask_prob
+                )
+            
+            # Add keyframe information to conditioning
+            y["keyframe_mask"] = keyframe_mask
+            y["keyframe_x0"] = x  # Provide clean motion data for keyframes
+            
+            # Ensure keyframe mask is consistent with motion mask
+            keyframe_mask = keyframe_mask & mask
 
         bs = len(x)
         # Sample a diffusion step between 0 and T-1
@@ -89,6 +136,14 @@ class GaussianDiffusion(DiffuserBase):
         noise = masked(torch.randn_like(x), mask)
         xt = self.q_sample(xstart=x, t=t, noise=noise)
         xt = masked(xt, mask)
+        
+        # Apply keyframe conditioning to noisy input if enabled
+        if self.keyframe_conditioned and keyframe_mask is not None:
+            keyframe_mask_expanded = keyframe_mask.unsqueeze(-1)  # [batch_size, max_frames, 1]            
+            # This line replaces the noisy motion data (xt) with clean motion data (x) at keyframe positions. Specifically:
+            # xt * (~keyframe_mask_expanded): Keeps the noisy motion data for non-keyframe regions
+            # x * keyframe_mask_expanded: Uses clean motion data for keyframe regions
+            xt = xt * (~keyframe_mask_expanded) + x * keyframe_mask_expanded
 
         # denoise it
         # no drop cond -> this is done in the training dataloader already
@@ -98,8 +153,46 @@ class GaussianDiffusion(DiffuserBase):
 
         # Predictions
         xstart = masked(self.output_to("x", output, xt, t), mask)
-        xloss = self.reconstruction_loss(xstart, x)
+        
+        # Compute loss with optional keyframe masking
+        reconstruction_loss = self.reconstruction_loss(xstart, x)  # [batch_size, max_frames, n_features]
+        
+        # Create loss mask based on keyframe conditioning
+        if self.keyframe_conditioned and keyframe_mask is not None:
+            loss_mask = create_keyframe_loss_mask(
+                keyframe_mask=keyframe_mask,
+                motion_mask=mask,
+                zero_keyframe_loss=self.zero_keyframe_loss
+            )
+        else:
+            loss_mask = mask
+            
+        # Apply loss mask
+        loss_mask_expanded = loss_mask.unsqueeze(-1)  # [batch_size, max_frames, 1]
+        masked_loss = reconstruction_loss * loss_mask_expanded.float()
+        
+        # Compute mean loss over valid (non-masked) elements
+        total_loss = masked_loss.sum()
+        valid_elements = loss_mask_expanded.sum()
+        xloss = total_loss / (valid_elements + 1e-8)  # Add epsilon to avoid division by zero
+        
         loss = {"loss": xloss}
+        
+        # Add additional logging for keyframe conditioning
+        if self.keyframe_conditioned and keyframe_mask is not None and training:
+            # Log keyframe statistics
+            keyframe_ratio = keyframe_mask.float().mean()
+            loss["keyframe_ratio"] = keyframe_ratio
+            
+            if self.zero_keyframe_loss:
+                # Log loss only on non-keyframe regions
+                non_keyframe_mask = mask & (~keyframe_mask)
+                if non_keyframe_mask.sum() > 0:
+                    non_keyframe_loss_mask = non_keyframe_mask.unsqueeze(-1)
+                    non_keyframe_loss = (reconstruction_loss * non_keyframe_loss_mask.float()).sum()
+                    non_keyframe_elements = non_keyframe_loss_mask.sum()
+                    loss["non_keyframe_loss"] = non_keyframe_loss / (non_keyframe_elements + 1e-8)
+            
         return loss
 
     def training_step(self, batch, batch_idx):

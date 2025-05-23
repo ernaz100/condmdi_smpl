@@ -9,6 +9,13 @@ logger = logging.getLogger(__name__)
 
 
 def save_stats(dataset, run_dir):
+    """
+    Compute and save motion and text embedding statistics for normalization.
+    
+    Args:
+        dataset: The training dataset to compute statistics from
+        run_dir: Directory to save the statistics
+    """
     is_training = dataset.is_training
     # don't drop anything
     dataset.is_training = False
@@ -45,6 +52,12 @@ def save_stats(dataset, run_dir):
 
 @hydra.main(config_path="configs", config_name="train", version_base="1.3")
 def train(cfg: DictConfig):
+    """
+    Main training function for STMC with optional keyframe conditioning.
+    
+    Args:
+        cfg: Hydra configuration object containing all training parameters
+    """
     # Resuming if needed
     ckpt = None
     if cfg.resume_dir is not None:
@@ -72,6 +85,17 @@ def train(cfg: DictConfig):
     train_dataset = instantiate(cfg.data, split="train")
     val_dataset = instantiate(cfg.data, split="val")
 
+    # Log keyframe conditioning settings if enabled
+    if hasattr(cfg, 'diffusion') and hasattr(cfg.diffusion, 'keyframe_conditioned'):
+        if cfg.diffusion.keyframe_conditioned:
+            logger.info("Keyframe conditioning enabled with following settings:")
+            logger.info(f"  - Selection scheme: {cfg.diffusion.keyframe_selection_scheme}")
+            logger.info(f"  - Keyframe mask probability: {cfg.diffusion.keyframe_mask_prob}")
+            logger.info(f"  - Zero keyframe loss: {cfg.diffusion.zero_keyframe_loss}")
+            logger.info(f"  - Number of keyframes: {cfg.diffusion.n_keyframes}")
+        else:
+            logger.info("Keyframe conditioning disabled")
+    
     if resume_dir is not None:
         logger.info("Computing statistics")
         save_stats(train_dataset, cfg.run_dir)
@@ -92,6 +116,13 @@ def train(cfg: DictConfig):
 
     logger.info("Loading the model")
     diffusion = instantiate(cfg.diffusion)
+    
+    # Log model architecture details for keyframe conditioning
+    if hasattr(diffusion, 'keyframe_conditioned') and diffusion.keyframe_conditioned:
+        logger.info("Diffusion model initialized with keyframe conditioning")
+        logger.info(f"  - Denoiser type: {type(diffusion.denoiser).__name__}")
+        if hasattr(diffusion.denoiser, 'keyframe_conditioned'):
+            logger.info(f"  - Denoiser keyframe support: {diffusion.denoiser.keyframe_conditioned}")
 
     logger.info("Training")
     trainer = instantiate(cfg.trainer)

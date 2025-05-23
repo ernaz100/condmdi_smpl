@@ -59,11 +59,12 @@ def mirror_smpl(
         if "humanact12" in motion_path:
             continue
 
-        if new_base_folder in motion_path:
+        if new_base_folder in motion_path and "MPI_" not in motion_path:
             continue
 
         # not mirroing again
         if motion_path.startswith("M"):
+            print(f"Skipping {motion_path} because it starts with 'M'")
             continue
 
         data = {x: y for x, y in np.load(motion_path).items()}
