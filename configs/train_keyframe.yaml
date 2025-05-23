@@ -10,8 +10,8 @@ exp_name: mdm-smpl-keyframe_${text_features}_${motion_features}_${dataset}
 
 dataloader:
   _target_: torch.utils.data.DataLoader
-  batch_size: 128
-  num_workers: 8
+  batch_size: 64
+  num_workers: 4
 
 dataset: humanml3d
 
