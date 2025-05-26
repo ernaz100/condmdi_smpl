@@ -118,21 +118,30 @@ class TransformerDenoiser(nn.Module):
         if self.keyframe_conditioned and "keyframe_mask" in y:
             keyframe_mask = y["keyframe_mask"]  # [bs, nframes] - True for keyframes
             
-            # Create keyframe token embeddings
+            # Ensure keyframe mask is consistent with motion mask
+            keyframe_mask = keyframe_mask & x_mask.squeeze(-1)  # Remove last dimension if present
+            
+            # Create keyframe token embeddings (binary indicator)
             keyframe_tokens = keyframe_mask.long()  # Convert to long for embedding lookup
             keyframe_emb = self.keyframe_token_embedding(keyframe_tokens)  # [bs, nframes, latent_dim]
             
             # Add keyframe information to motion embeddings
             x_emb = x_emb + keyframe_emb
             
-            # Optional: For keyframe regions, also incorporate the clean data
+            #  For keyframe regions, also incorporate the clean data
             if "keyframe_x0" in y:
-                keyframe_x0 = y["keyframe_x0"]  # Clean motion data
+                keyframe_x0 = y["keyframe_x0"]  # Clean motion data [bs, nframes, nfeats]
+                
+                # Create separate embedding for clean keyframe data
                 keyframe_data_emb = self.keyframe_data_embedding(keyframe_x0)
                 
                 # Only add keyframe data embedding where we have keyframes
                 keyframe_mask_expanded = keyframe_mask.unsqueeze(-1)  # [bs, nframes, 1]
                 x_emb = x_emb + keyframe_data_emb * keyframe_mask_expanded.float()
+                
+                # Alternative approach: Replace embeddings entirely at keyframe positions
+                # This ensures the model gets strong signal about observed keyframes
+                # x_emb = x_emb * (~keyframe_mask_expanded).float() + keyframe_data_emb * keyframe_mask_expanded.float()
 
         number_of_info = info_emb.shape[1]
 

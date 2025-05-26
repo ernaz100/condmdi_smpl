@@ -5,8 +5,8 @@ ckpt: last
 motion_features: ${hydra:runtime.choices.motion_loader}
 text_features: ${hydra:runtime.choices.text_encoder}
 
-run_dir: outputs/mdm-smpl-keyframe_${text_features}_${motion_features}_${dataset}
-exp_name: mdm-smpl-keyframe_${text_features}_${motion_features}_${dataset}
+run_dir: outputs/cond-mdm-smpl-keyframe_${text_features}_${motion_features}_${dataset}
+exp_name: cond-mdm-smpl-keyframe_${text_features}_${motion_features}_${dataset}
 
 dataloader:
   _target_: torch.utils.data.DataLoader
