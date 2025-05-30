@@ -50,6 +50,7 @@ class GaussianDiffusion(DiffuserBase):
         keyframe_mask_prob: float = 0.1,
         zero_keyframe_loss: bool = False,
         n_keyframes: int = 10,
+        keyframe_loss_weight: float = 2.0,
     ):
         super().__init__(schedule, timesteps)
 
@@ -70,6 +71,7 @@ class GaussianDiffusion(DiffuserBase):
         self.keyframe_mask_prob = keyframe_mask_prob
         self.zero_keyframe_loss = zero_keyframe_loss
         self.n_keyframes = n_keyframes
+        self.keyframe_loss_weight = keyframe_loss_weight
 
     def configure_optimizers(self) -> None:
         return {"optimizer": torch.optim.AdamW(lr=self.lr, params=self.parameters())}
@@ -159,17 +161,20 @@ class GaussianDiffusion(DiffuserBase):
         
         # Create loss mask based on keyframe conditioning
         if self.keyframe_conditioned and keyframe_mask is not None:
-            loss_mask = create_keyframe_loss_mask(
-                keyframe_mask=keyframe_mask,
-                motion_mask=mask,
-                zero_keyframe_loss=self.zero_keyframe_loss
-            )
+            # Create a float mask: keyframes get keyframe_loss_weight, others get 1.0
+            loss_mask = mask.float().clone()
+            if self.zero_keyframe_loss:
+                # Zero out keyframe loss
+                loss_mask[keyframe_mask] = 0.0
+            else:
+                # Increase keyframe loss at keyframe positions
+                loss_mask[keyframe_mask] = self.keyframe_loss_weight
         else:
-            loss_mask = mask
+            loss_mask = mask.float()
             
-        # Apply loss mask
+        # Expand mask for features
         loss_mask_expanded = loss_mask.unsqueeze(-1)  # [batch_size, max_frames, 1]
-        masked_loss = reconstruction_loss * loss_mask_expanded.float()
+        masked_loss = reconstruction_loss * loss_mask_expanded
         
         # Compute mean loss over valid (non-masked) elements
         total_loss = masked_loss.sum()
